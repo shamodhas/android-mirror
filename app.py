@@ -136,7 +136,7 @@ class AirScreenApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("500x410")
+        self.root.geometry("500x430")
         self.root.resizable(False, False)
 
         icon_file = resource_path(os.path.join("assets", "app.ico"))
@@ -152,10 +152,24 @@ class AirScreenApp:
         self.scrcpy_version: Tuple[int, int, int] = (2, 0, 0)
         self._mirror_proc: Optional[subprocess.Popen[Any]] = None
         self._busy = False
+        self._action_buttons: List[Tuple[ttk.Button, str]] = []
+        self._spinner_idx = 0
+        self._spinner_frames = ["⠋", "⠙", "⠹",
+                                "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._active_btn: Optional[ttk.Button] = None
+        self._active_btn_base_text: str = ""
 
         self._build_ui()
-        self._run_bg(self._auto_init_and_connect,
-                     on_done=self._on_auto_init_done)
+        self._run_bg(
+            self._auto_init_and_connect,
+            on_done=self._on_auto_init_done,
+            btn=self.primary_btn,
+            loading_label="Preparing...",
+        )
+
+    def _register_btn(self, btn: ttk.Button) -> ttk.Button:
+        self._action_buttons.append((btn, str(btn.cget("text"))))
+        return btn
 
     def _build_ui(self) -> None:
         pad = ttk.Frame(self.root, padding=14)
@@ -175,7 +189,7 @@ class AirScreenApp:
         self.tool_status = ttk.Label(
             pad, text="Auto-preparing ADB & scrcpy...", foreground="#555"
         )
-        self.tool_status.pack(anchor="w", pady=(2, 10))
+        self.tool_status.pack(anchor="w", pady=(2, 8))
 
         notebook = ttk.Notebook(pad)
         notebook.pack(fill=tk.BOTH, expand=True)
@@ -188,14 +202,19 @@ class AirScreenApp:
         ttk.Label(dev_row, text="Active Device:").pack(side=tk.LEFT)
         self.device_var = tk.StringVar(value="Auto")
         self.device_combo = ttk.Combobox(
-            dev_row, textvariable=self.device_var, values=["Auto"], width=26, state="readonly"
+            dev_row, textvariable=self.device_var, values=["Auto"], width=22, state="readonly"
         )
-        self.device_combo.pack(side=tk.LEFT, padx=(6, 8))
-        ttk.Button(dev_row, text="Scan", width=7,
-                   command=self.refresh_devices).pack(side=tk.LEFT)
-        ttk.Button(dev_row, text="Disconnect TCP", width=13, command=self.disconnect_tcp).pack(
-            side=tk.LEFT, padx=(6, 0)
+        self.device_combo.pack(side=tk.LEFT, padx=(6, 6))
+        self.scan_btn = self._register_btn(
+            ttk.Button(dev_row, text="Scan", width=7,
+                       command=self.refresh_devices)
         )
+        self.scan_btn.pack(side=tk.LEFT)
+        self.disc_btn = self._register_btn(
+            ttk.Button(dev_row, text="Disconnect TCP",
+                       width=13, command=self.disconnect_tcp)
+        )
+        self.disc_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         ttk.Label(
             auto_tab, text="Phone Wi-Fi IP (auto-detected when empty):").pack(anchor="w")
@@ -206,7 +225,7 @@ class AirScreenApp:
             self.ip_entry.insert(0, saved_ip)
 
         opts_row = ttk.Frame(auto_tab)
-        opts_row.pack(fill=tk.X, pady=(0, 10))
+        opts_row.pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(opts_row, text="Port:").pack(side=tk.LEFT)
         self.port_entry = ttk.Entry(opts_row, width=7)
@@ -238,20 +257,35 @@ class AirScreenApp:
             side=tk.LEFT
         )
 
+        self.close_after_mirror_var = tk.BooleanVar(
+            value=bool(self.state.get("close_after_mirror", True))
+        )
+        ttk.Checkbutton(
+            auto_tab,
+            text="Close settings window after mirror opens",
+            variable=self.close_after_mirror_var,
+        ).pack(anchor="w", pady=(0, 8))
+
         btn_row = ttk.Frame(auto_tab)
         btn_row.pack(fill=tk.X, pady=(2, 6))
-        self.primary_btn = ttk.Button(
-            btn_row, text="Auto-Connect & Mirror", command=self.start_smart_mirror
+        self.primary_btn = self._register_btn(
+            ttk.Button(btn_row, text="Auto-Connect & Mirror",
+                       command=self.start_smart_mirror)
         )
         self.primary_btn.pack(side=tk.LEFT, fill=tk.X,
                               expand=True, padx=(0, 6))
-        ttk.Button(btn_row, text="Stop Mirror", width=12, command=self.stop_mirror).pack(
-            side=tk.LEFT
+        self.stop_btn = self._register_btn(
+            ttk.Button(btn_row, text="Stop Mirror",
+                       width=12, command=self.stop_mirror)
         )
+        self.stop_btn.pack(side=tk.LEFT)
 
-        ttk.Button(
-            auto_tab, text="Re-download / Update Tools", command=self.force_download_tools
-        ).pack(fill=tk.X)
+        self.update_tools_btn = self._register_btn(
+            ttk.Button(
+                auto_tab, text="Re-download / Update Tools", command=self.force_download_tools
+            )
+        )
+        self.update_tools_btn.pack(fill=tk.X)
 
         pair_tab = ttk.Frame(notebook, padding=12)
         notebook.add(pair_tab, text="Pair (Android 11+)")
@@ -270,14 +304,33 @@ class AirScreenApp:
         self.pair_conn_port = ttk.Entry(pair_tab, width=10)
         self.pair_conn_port.pack(anchor="w", pady=(2, 10))
 
-        ttk.Button(pair_tab, text="Pair & Mirror", command=self.start_pair_and_mirror).pack(
-            fill=tk.X
+        self.pair_btn = self._register_btn(
+            ttk.Button(pair_tab, text="Pair & Mirror",
+                       command=self.start_pair_and_mirror)
         )
+        self.pair_btn.pack(fill=tk.X)
+
+        self.progress = ttk.Progressbar(pad, mode="indeterminate")
+        self.progress.pack(fill=tk.X, pady=(10, 4))
 
         self.status_var = tk.StringVar(value="Starting...")
         ttk.Label(pad, textvariable=self.status_var, wraplength=465, foreground="#222").pack(
-            anchor="w", pady=(10, 0)
+            anchor="w"
         )
+
+    def _tick_spinner(self) -> None:
+        if not self._busy:
+            return
+        frame = self._spinner_frames[self._spinner_idx %
+                                     len(self._spinner_frames)]
+        self._spinner_idx += 1
+        if self._active_btn is not None:
+            try:
+                self._active_btn.config(
+                    text=f"{frame} {self._active_btn_base_text}")
+            except Exception:
+                pass
+        self.root.after(90, self._tick_spinner)
 
     def _set_status(self, msg: str) -> None:
         self.root.after(0, lambda m=msg: self.status_var.set(m))
@@ -303,19 +356,45 @@ class AirScreenApp:
             ),
         )
 
-    def _set_busy(self, busy: bool) -> None:
+    def _set_busy(
+        self,
+        busy: bool,
+        btn: Optional[ttk.Button] = None,
+        loading_label: str = "Working...",
+    ) -> None:
         self._busy = busy
-        state = tk.DISABLED if busy else tk.NORMAL
-        self.root.after(0, lambda s=state: self.primary_btn.config(state=s))
+        if busy:
+            self._active_btn = btn
+            self._active_btn_base_text = loading_label
+            self._spinner_idx = 0
+            for b, _ in self._action_buttons:
+                b.config(state=tk.DISABLED)
+            self.progress.start(12)
+            self._tick_spinner()
+        else:
+            self.progress.stop()
+            for b, orig_text in self._action_buttons:
+                b.config(text=orig_text, state=tk.NORMAL)
+            self._active_btn = None
+            self._active_btn_base_text = ""
+
+    def _close_settings_window(self) -> None:
+        if self.close_after_mirror_var.get():
+            try:
+                self.root.withdraw()
+            except Exception:
+                pass
 
     def _run_bg(
         self,
         fn: Callable[[], Any],
         on_done: Optional[Callable[[Any], None]] = None,
+        btn: Optional[ttk.Button] = None,
+        loading_label: str = "Working...",
     ) -> None:
         if self._busy:
             return
-        self._set_busy(True)
+        self._set_busy(True, btn=btn, loading_label=loading_label)
 
         def runner() -> None:
             result: Any = None
@@ -393,7 +472,7 @@ class AirScreenApp:
                     )
 
         self._set_status("Stopping running ADB/scrcpy & extracting...")
-        self.stop_mirror()
+        self._stop_mirror_process()
         stop_adb_and_scrcpy()
         buf.seek(0)
         safe_extract_zip(buf, TOOLS_DIR)
@@ -475,16 +554,7 @@ class AirScreenApp:
         _ = (major, minor)
         return cmd
 
-    def _launch_scrcpy(self, scrcpy: str, target: str) -> None:
-        self.stop_mirror()
-        cmd = self._build_scrcpy_cmd(scrcpy, target)
-        tools_parent = os.path.dirname(scrcpy)
-        env = os.environ.copy()
-        env["PATH"] = f"{tools_parent}{os.pathsep}{TOOLS_DIR}{os.pathsep}{env.get('PATH', '')}"
-        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        self._mirror_proc = subprocess.Popen(cmd, env=env, creationflags=flags)
-
-    def stop_mirror(self) -> None:
+    def _stop_mirror_process(self) -> None:
         proc = self._mirror_proc
         self._mirror_proc = None
         if proc is not None and proc.poll() is None:
@@ -496,19 +566,40 @@ class AirScreenApp:
                     proc.kill()
                 except Exception:
                     pass
-        self._set_status("Mirroring stopped.")
+
+    def _launch_scrcpy(self, scrcpy: str, target: str) -> None:
+        self._stop_mirror_process()
+        cmd = self._build_scrcpy_cmd(scrcpy, target)
+        tools_parent = os.path.dirname(scrcpy)
+        env = os.environ.copy()
+        env["PATH"] = f"{tools_parent}{os.pathsep}{TOOLS_DIR}{os.pathsep}{env.get('PATH', '')}"
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        self._mirror_proc = subprocess.Popen(cmd, env=env, creationflags=flags)
+        self.root.after(350, self._close_settings_window)
+
+    def stop_mirror(self) -> None:
+        def task() -> str:
+            self._set_status("Stopping active mirror...")
+            self._stop_mirror_process()
+            return "Mirroring stopped."
+
+        self._run_bg(task, on_done=lambda m: self._set_status(
+            str(m)), btn=self.stop_btn, loading_label="Stopping...")
 
     def refresh_devices(self) -> None:
         def task() -> str:
+            self._set_status("Scanning connected ADB devices...")
             adb, _ = self._ensure_tools_ready(force=False)
             serials = self._connected_serials(adb)
             return f"Found {len(serials)} connected device(s)."
 
-        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+        self._run_bg(task, on_done=lambda m: self._set_status(
+            str(m)), btn=self.scan_btn, loading_label="Scanning...")
 
     def disconnect_tcp(self) -> None:
         def task() -> str:
-            self.stop_mirror()
+            self._set_status("Disconnecting wireless ADB sessions...")
+            self._stop_mirror_process()
             adb, _ = self._ensure_tools_ready(force=False)
             serials = self._connected_serials(adb)
             tcp_devs = [s for s in serials if ":" in s]
@@ -517,7 +608,8 @@ class AirScreenApp:
             self._connected_serials(adb)
             return f"Disconnected {len(tcp_devs)} wireless session(s)."
 
-        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+        self._run_bg(task, on_done=lambda m: self._set_status(
+            str(m)), btn=self.disc_btn, loading_label="Disconnecting...")
 
     def _persist_session(self, ip: str, port: int) -> None:
         save_state({
@@ -526,6 +618,7 @@ class AirScreenApp:
             "max_size": self.max_size_var.get(),
             "screen_off": self.screen_off_var.get(),
             "stay_awake": self.stay_awake_var.get(),
+            "close_after_mirror": self.close_after_mirror_var.get(),
         })
 
     def _auto_init_and_connect(self) -> Optional[str]:
@@ -533,12 +626,8 @@ class AirScreenApp:
         serials = self._connected_serials(adb)
         selected = self.device_var.get()
         if selected != "Auto" and selected in serials:
-            if ":" not in selected:
-                usb_devs = [selected]
-                tcp_devs = []
-            else:
-                usb_devs = []
-                tcp_devs = [selected]
+            usb_devs = [selected] if ":" not in selected else []
+            tcp_devs = [selected] if ":" in selected else []
         else:
             usb_devs = [s for s in serials if ":" not in s]
             tcp_devs = [s for s in serials if ":" in s]
@@ -652,14 +741,24 @@ class AirScreenApp:
             self._launch_scrcpy(scrcpy, target)
             return f"Mirroring {target} wirelessly."
 
-        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+        self._run_bg(
+            task,
+            on_done=lambda m: self._set_status(str(m)),
+            btn=self.primary_btn,
+            loading_label="Connecting...",
+        )
 
     def force_download_tools(self) -> None:
         def task() -> str:
             self._ensure_tools_ready(force=True)
             return "Updated ADB & scrcpy tools."
 
-        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+        self._run_bg(
+            task,
+            on_done=lambda m: self._set_status(str(m)),
+            btn=self.update_tools_btn,
+            loading_label="Updating Tools...",
+        )
 
     def start_pair_and_mirror(self) -> None:
         pair_addr = self.pair_addr_entry.get().strip()
@@ -712,7 +811,12 @@ class AirScreenApp:
             self._launch_scrcpy(scrcpy, target)
             return f"Paired & mirroring {target} wirelessly."
 
-        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+        self._run_bg(
+            task,
+            on_done=lambda m: self._set_status(str(m)),
+            btn=self.pair_btn,
+            loading_label="Pairing...",
+        )
 
 
 def main() -> None:
