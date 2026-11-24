@@ -1,4 +1,13 @@
+# Python & packaging artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller build outputs
 build/
 dist/
-__pycache__/
-*.spec
+*.spec.bak
