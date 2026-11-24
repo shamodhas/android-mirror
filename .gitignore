@@ -10,4 +10,6 @@ env/
 # PyInstaller build outputs
 build/
 dist/
+Output/
 *.spec.bak
+
