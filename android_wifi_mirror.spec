@@ -1,4 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
+﻿# -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
     ["app.py"],
@@ -20,7 +20,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name="AndroidWiFiMirror",
+    name="AirScreen",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

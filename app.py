@@ -1,4 +1,4 @@
-import io
+﻿import io
 import ipaddress
 import json
 import os
@@ -13,7 +13,8 @@ import zipfile
 from tkinter import messagebox, ttk
 from typing import Any, Callable, List, Optional, Tuple
 
-APP_TITLE = "Android WiFi Mirror — scrcpy PC"
+APP_VERSION = "3.0.0"
+APP_TITLE = f"Air Screen v{APP_VERSION} — Android WiFi Mirror"
 STORAGE_FOLDER = "android-wifi-mirror-scrcpy-pc"
 DEFAULT_PORT = 5555
 APP_DATA = os.path.join(
@@ -48,9 +49,11 @@ def resource_path(rel_path: str) -> str:
 
 
 def find_binary(exe_name: str) -> Optional[str]:
+    exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     search_dirs: List[str] = [
+        os.path.join(exe_dir, "tools"),
         TOOLS_DIR,
-        os.path.dirname(os.path.abspath(sys.argv[0])),
+        exe_dir,
         *(
             p.strip()
             for p in os.environ.get("PATH", "").split(os.pathsep)
@@ -77,6 +80,14 @@ def run_cmd(args: List[str], timeout: int = 15) -> Tuple[int, str, str]:
         return proc.returncode, (proc.stdout or "").strip(), (proc.stderr or "").strip()
     except Exception as exc:
         return 1, "", str(exc)
+
+
+def stop_adb_and_scrcpy() -> None:
+    if sys.platform != "win32":
+        return
+    for exe in ("scrcpy.exe", "adb.exe"):
+        run_cmd(["taskkill", "/F", "/IM", exe], timeout=6)
+    time.sleep(0.4)
 
 
 def safe_extract_zip(zip_bytes: io.BytesIO, dest_root: str) -> None:
@@ -121,11 +132,11 @@ def save_state(data: dict[str, Any]) -> None:
         pass
 
 
-class AndroidWiFiMirrorApp:
+class AirScreenApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("480x370")
+        self.root.geometry("500x410")
         self.root.resizable(False, False)
 
         icon_file = resource_path(os.path.join("assets", "app.ico"))
@@ -139,6 +150,7 @@ class AndroidWiFiMirrorApp:
         self.adb_path: Optional[str] = None
         self.scrcpy_path: Optional[str] = None
         self.scrcpy_version: Tuple[int, int, int] = (2, 0, 0)
+        self._mirror_proc: Optional[subprocess.Popen[Any]] = None
         self._busy = False
 
         self._build_ui()
@@ -151,8 +163,11 @@ class AndroidWiFiMirrorApp:
 
         header = ttk.Frame(pad)
         header.pack(fill=tk.X)
-        ttk.Label(header, text="Android WiFi Mirror", font=(
+        ttk.Label(header, text="Air Screen", font=(
             "Segoe UI", 15, "bold")).pack(side=tk.LEFT)
+        ttk.Label(header, text=f"v{APP_VERSION}", foreground="#0f766e", font=("Segoe UI", 9, "bold")).pack(
+            side=tk.LEFT, padx=(8, 0), anchor="s"
+        )
         self.ver_badge = ttk.Label(
             header, text="scrcpy: detecting...", foreground="#555")
         self.ver_badge.pack(side=tk.RIGHT, anchor="s")
@@ -165,9 +180,22 @@ class AndroidWiFiMirrorApp:
         notebook = ttk.Notebook(pad)
         notebook.pack(fill=tk.BOTH, expand=True)
 
-        # Tab 1: Automatic Wi-Fi Mirror
         auto_tab = ttk.Frame(notebook, padding=12)
         notebook.add(auto_tab, text="Auto Wireless Mirror")
+
+        dev_row = ttk.Frame(auto_tab)
+        dev_row.pack(fill=tk.X, pady=(0, 8))
+        ttk.Label(dev_row, text="Active Device:").pack(side=tk.LEFT)
+        self.device_var = tk.StringVar(value="Auto")
+        self.device_combo = ttk.Combobox(
+            dev_row, textvariable=self.device_var, values=["Auto"], width=26, state="readonly"
+        )
+        self.device_combo.pack(side=tk.LEFT, padx=(6, 8))
+        ttk.Button(dev_row, text="Scan", width=7,
+                   command=self.refresh_devices).pack(side=tk.LEFT)
+        ttk.Button(dev_row, text="Disconnect TCP", width=13, command=self.disconnect_tcp).pack(
+            side=tk.LEFT, padx=(6, 0)
+        )
 
         ttk.Label(
             auto_tab, text="Phone Wi-Fi IP (auto-detected when empty):").pack(anchor="w")
@@ -185,7 +213,7 @@ class AndroidWiFiMirrorApp:
         saved_port = str(self.state.get("last_port", DEFAULT_PORT))
         self.port_entry.insert(0, saved_port if is_valid_port(
             saved_port) else str(DEFAULT_PORT))
-        self.port_entry.pack(side=tk.LEFT, padx=(4, 12))
+        self.port_entry.pack(side=tk.LEFT, padx=(4, 10))
 
         self.max_size_var = tk.StringVar(
             value=str(self.state.get("max_size", "1280")))
@@ -196,24 +224,35 @@ class AndroidWiFiMirrorApp:
             values=["800", "1024", "1280", "1920", "0"],
             width=6,
             state="readonly",
-        ).pack(side=tk.LEFT, padx=(4, 12))
+        ).pack(side=tk.LEFT, padx=(4, 10))
 
         self.screen_off_var = tk.BooleanVar(
             value=bool(self.state.get("screen_off", False)))
         ttk.Checkbutton(opts_row, text="Screen Off", variable=self.screen_off_var).pack(
+            side=tk.LEFT, padx=(0, 8)
+        )
+
+        self.stay_awake_var = tk.BooleanVar(
+            value=bool(self.state.get("stay_awake", True)))
+        ttk.Checkbutton(opts_row, text="Stay Awake", variable=self.stay_awake_var).pack(
             side=tk.LEFT
         )
 
+        btn_row = ttk.Frame(auto_tab)
+        btn_row.pack(fill=tk.X, pady=(2, 6))
         self.primary_btn = ttk.Button(
-            auto_tab, text="Auto-Connect & Mirror", command=self.start_smart_mirror
+            btn_row, text="Auto-Connect & Mirror", command=self.start_smart_mirror
         )
-        self.primary_btn.pack(fill=tk.X, pady=(2, 6))
+        self.primary_btn.pack(side=tk.LEFT, fill=tk.X,
+                              expand=True, padx=(0, 6))
+        ttk.Button(btn_row, text="Stop Mirror", width=12, command=self.stop_mirror).pack(
+            side=tk.LEFT
+        )
 
         ttk.Button(
             auto_tab, text="Re-download / Update Tools", command=self.force_download_tools
         ).pack(fill=tk.X)
 
-        # Tab 2: Android 11+ Wireless Pairing
         pair_tab = ttk.Frame(notebook, padding=12)
         notebook.add(pair_tab, text="Pair (Android 11+)")
 
@@ -236,7 +275,7 @@ class AndroidWiFiMirrorApp:
         )
 
         self.status_var = tk.StringVar(value="Starting...")
-        ttk.Label(pad, textvariable=self.status_var, wraplength=445, foreground="#222").pack(
+        ttk.Label(pad, textvariable=self.status_var, wraplength=465, foreground="#222").pack(
             anchor="w", pady=(10, 0)
         )
 
@@ -251,6 +290,18 @@ class AndroidWiFiMirrorApp:
         text = f"scrcpy v{ver[0]}.{ver[1]}.{ver[2]}"
         self.root.after(0, lambda t=text: self.ver_badge.config(
             text=t, foreground="#1d4ed8"))
+
+    def _set_device_list(self, serials: List[str]) -> None:
+        items = ["Auto", *serials]
+        current = self.device_var.get()
+        chosen = current if current in items else "Auto"
+        self.root.after(
+            0,
+            lambda vals=items, sel=chosen: (
+                self.device_combo.config(values=vals),
+                self.device_var.set(sel),
+            ),
+        )
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -341,7 +392,9 @@ class AndroidWiFiMirrorApp:
                         f"Downloading tools... {pct}% ({done / 1048576:.1f}/{total / 1048576:.1f} MB)"
                     )
 
-        self._set_status("Extracting ADB & scrcpy...")
+        self._set_status("Stopping running ADB/scrcpy & extracting...")
+        self.stop_mirror()
+        stop_adb_and_scrcpy()
         buf.seek(0)
         safe_extract_zip(buf, TOOLS_DIR)
 
@@ -389,6 +442,7 @@ class AndroidWiFiMirrorApp:
             line = line.strip()
             if line.endswith("\tdevice"):
                 serials.append(line.split("\t")[0].strip())
+        self._set_device_list(serials)
         return serials
 
     def _detect_phone_ip(self, adb: str, serial: str) -> Optional[str]:
@@ -415,22 +469,80 @@ class AndroidWiFiMirrorApp:
         if self.screen_off_var.get():
             cmd.append("--turn-screen-off")
 
-        cmd.append("--stay-awake")
+        if self.stay_awake_var.get():
+            cmd.append("--stay-awake")
+
         _ = (major, minor)
         return cmd
 
     def _launch_scrcpy(self, scrcpy: str, target: str) -> None:
+        self.stop_mirror()
         cmd = self._build_scrcpy_cmd(scrcpy, target)
+        tools_parent = os.path.dirname(scrcpy)
         env = os.environ.copy()
-        env["PATH"] = f"{TOOLS_DIR}{os.pathsep}{env.get('PATH', '')}"
+        env["PATH"] = f"{tools_parent}{os.pathsep}{TOOLS_DIR}{os.pathsep}{env.get('PATH', '')}"
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-        subprocess.Popen(cmd, env=env, creationflags=flags)
+        self._mirror_proc = subprocess.Popen(cmd, env=env, creationflags=flags)
+
+    def stop_mirror(self) -> None:
+        proc = self._mirror_proc
+        self._mirror_proc = None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        self._set_status("Mirroring stopped.")
+
+    def refresh_devices(self) -> None:
+        def task() -> str:
+            adb, _ = self._ensure_tools_ready(force=False)
+            serials = self._connected_serials(adb)
+            return f"Found {len(serials)} connected device(s)."
+
+        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+
+    def disconnect_tcp(self) -> None:
+        def task() -> str:
+            self.stop_mirror()
+            adb, _ = self._ensure_tools_ready(force=False)
+            serials = self._connected_serials(adb)
+            tcp_devs = [s for s in serials if ":" in s]
+            for dev in tcp_devs:
+                run_cmd([adb, "disconnect", dev], timeout=6)
+            self._connected_serials(adb)
+            return f"Disconnected {len(tcp_devs)} wireless session(s)."
+
+        self._run_bg(task, on_done=lambda m: self._set_status(str(m)))
+
+    def _persist_session(self, ip: str, port: int) -> None:
+        save_state({
+            "last_ip": ip,
+            "last_port": port,
+            "max_size": self.max_size_var.get(),
+            "screen_off": self.screen_off_var.get(),
+            "stay_awake": self.stay_awake_var.get(),
+        })
 
     def _auto_init_and_connect(self) -> Optional[str]:
         adb, scrcpy = self._ensure_tools_ready(force=False)
         serials = self._connected_serials(adb)
-        usb_devs = [s for s in serials if ":" not in s]
-        tcp_devs = [s for s in serials if ":" in s]
+        selected = self.device_var.get()
+        if selected != "Auto" and selected in serials:
+            if ":" not in selected:
+                usb_devs = [selected]
+                tcp_devs = []
+            else:
+                usb_devs = []
+                tcp_devs = [selected]
+        else:
+            usb_devs = [s for s in serials if ":" not in s]
+            tcp_devs = [s for s in serials if ":" in s]
+
         port_str = self.port_entry.get().strip() or str(DEFAULT_PORT)
         port = int(port_str) if is_valid_port(port_str) else DEFAULT_PORT
 
@@ -448,12 +560,7 @@ class AndroidWiFiMirrorApp:
                 run_cmd([adb, "connect", target], timeout=8)
                 time.sleep(0.7)
                 if target in self._connected_serials(adb):
-                    save_state({
-                        "last_ip": ip,
-                        "last_port": port,
-                        "max_size": self.max_size_var.get(),
-                        "screen_off": self.screen_off_var.get(),
-                    })
+                    self._persist_session(ip, port)
                     self._launch_scrcpy(scrcpy, target)
                     return f"Auto-connected & mirroring {target}"
             return f"Enabled TCP/IP {port} via USB. Enter phone IP and click Auto-Connect & Mirror."
@@ -497,7 +604,11 @@ class AndroidWiFiMirrorApp:
         def task() -> str:
             adb, scrcpy = self._ensure_tools_ready(force=False)
             serials = self._connected_serials(adb)
-            usb_devs = [s for s in serials if ":" not in s]
+            selected = self.device_var.get()
+            if selected != "Auto" and selected in serials:
+                usb_devs = [selected] if ":" not in selected else []
+            else:
+                usb_devs = [s for s in serials if ":" not in s]
 
             if usb_devs:
                 usb = usb_devs[0]
@@ -518,12 +629,7 @@ class AndroidWiFiMirrorApp:
                 if target not in self._connected_serials(adb):
                     raise RuntimeError(
                         f"Could not connect over Wi-Fi to {target}.")
-                save_state({
-                    "last_ip": ip,
-                    "last_port": port,
-                    "max_size": self.max_size_var.get(),
-                    "screen_off": self.screen_off_var.get(),
-                })
+                self._persist_session(ip, port)
                 self._launch_scrcpy(scrcpy, target)
                 return f"Mirroring {target} wirelessly."
 
@@ -542,12 +648,7 @@ class AndroidWiFiMirrorApp:
                 raise RuntimeError(
                     f"Failed to connect to {target}. Ensure both devices are on the same Wi-Fi and port {port} is open."
                 )
-            save_state({
-                "last_ip": typed_ip,
-                "last_port": port,
-                "max_size": self.max_size_var.get(),
-                "screen_off": self.screen_off_var.get(),
-            })
+            self._persist_session(typed_ip, port)
             self._launch_scrcpy(scrcpy, target)
             return f"Mirroring {target} wirelessly."
 
@@ -607,12 +708,7 @@ class AndroidWiFiMirrorApp:
                     self.port_entry.insert(0, p),
                 ),
             )
-            save_state({
-                "last_ip": ip,
-                "last_port": conn_port,
-                "max_size": self.max_size_var.get(),
-                "screen_off": self.screen_off_var.get(),
-            })
+            self._persist_session(ip, conn_port)
             self._launch_scrcpy(scrcpy, target)
             return f"Paired & mirroring {target} wirelessly."
 
@@ -621,7 +717,7 @@ class AndroidWiFiMirrorApp:
 
 def main() -> None:
     root = tk.Tk()
-    AndroidWiFiMirrorApp(root)
+    AirScreenApp(root)
     root.mainloop()
 
 
